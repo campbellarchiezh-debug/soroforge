@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -410,8 +411,38 @@ Pass --network to restrict the list to one network.`,
 	}
 }
 
+func parseSince(raw string) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	for _, layout := range []string{
+		"2006-01-02",
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+	} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, nil
+		}
+	}
+	if strings.HasSuffix(raw, "d") {
+		daysStr := strings.TrimSuffix(raw, "d")
+		days, err := strconv.Atoi(daysStr)
+		if err == nil && days > 0 {
+			return time.Now().Add(-time.Duration(days) * 24 * time.Hour), nil
+		}
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return time.Now().Add(-d), nil
+	}
+	return time.Time{}, fmt.Errorf("invalid --since value %q: expected date (e.g. 2026-09-01) or duration (e.g. 30d, 24h)", raw)
+}
+
 func newHistoryCmd() *cobra.Command {
-	var failures bool
+	var (
+		failures bool
+		limit    int
+		sinceRaw string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "history <alias>",
@@ -432,6 +463,14 @@ The subcommands move the whole history between databases:
   history import  load such a document into an empty (or, with --merge, existing) database`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if limit < 0 {
+				return fmt.Errorf("invalid --limit value %d: must be positive", limit)
+			}
+			sinceTime, err := parseSince(sinceRaw)
+			if err != nil {
+				return err
+			}
+
 			a, err := newApp(cmd.Context(), appOptions{})
 			if err != nil {
 				return err
@@ -449,19 +488,54 @@ The subcommands move the whole history between databases:
 				if err != nil {
 					return err
 				}
+				if !sinceTime.IsZero() {
+					filtered := attempts[:0]
+					for _, att := range attempts {
+						if att.CreatedAt.After(sinceTime) {
+							filtered = append(filtered, att)
+						}
+					}
+					attempts = filtered
+				}
+				if limit > 0 && len(attempts) > limit {
+					attempts = attempts[:limit]
+				}
 				return printFailures(alias, network, attempts)
 			}
 
-			deployments, err := a.service.History(cmd.Context(), network, alias)
+			var deployments []store.Deployment
+			if limit > 0 && sinceTime.IsZero() {
+				deployments, err = a.service.HistoryPage(cmd.Context(), network, alias, limit, 0)
+			} else {
+				deployments, err = a.service.History(cmd.Context(), network, alias)
+			}
 			if err != nil {
 				return err
 			}
+
+			if !sinceTime.IsZero() {
+				filtered := deployments[:0]
+				for _, d := range deployments {
+					if d.CreatedAt.After(sinceTime) {
+						filtered = append(filtered, d)
+					}
+				}
+				deployments = filtered
+			}
+			if limit > 0 && len(deployments) > limit {
+				deployments = deployments[:limit]
+			}
+
 			return printHistory(alias, network, deployments)
 		},
 	}
 
 	cmd.Flags().BoolVar(&failures, "failures", false,
 		"show failed deploy and upgrade attempts instead of confirmed history")
+	cmd.Flags().IntVar(&limit, "limit", 0,
+		"print the N newest records")
+	cmd.Flags().StringVar(&sinceRaw, "since", "",
+		"print records after a date (YYYY-MM-DD) or duration (e.g. 30d, 24h)")
 	attachAliasCompletion(cmd)
 	cmd.AddCommand(newHistoryExportCmd(), newHistoryImportCmd())
 	return cmd

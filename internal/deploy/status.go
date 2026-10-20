@@ -259,11 +259,19 @@ func (s *Service) Failures(ctx context.Context, network, alias string) ([]store.
 	return s.store.Attempts(ctx, name, alias)
 }
 
-// HistoryPage returns one newest-first page of a contract's deployment log.
+// HistoryPage returns one newest-first page of a contract's deployment log with explorer URLs.
 func (s *Service) HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]store.Deployment, error) {
-	name, _, err := s.cfg.Network(network)
+	name, n, err := s.cfg.Network(network)
 	if err != nil {
 		return nil, err
 	}
-	return s.store.HistoryPage(ctx, name, alias, limit, offset)
+	history, err := s.store.HistoryPage(ctx, name, alias, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	for i := range history {
+		history[i].ContractURL = n.ContractExplorerURL(history[i].ContractID)
+		history[i].TxURL = n.TransactionExplorerURL(history[i].TxHash)
+	}
+	return history, nil
 }
